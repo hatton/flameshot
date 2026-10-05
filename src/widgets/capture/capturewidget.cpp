@@ -38,6 +38,9 @@
 #include <QScreen>
 #include <QShortcut>
 #include <QWindow>
+#if defined(Q_OS_WIN)
+#include <windows.h>
+#endif
 
 #if !defined(DISABLE_UPDATE_CHECKER)
 #include "widgets/updatenotificationwidget.h"
@@ -121,8 +124,16 @@ CaptureWidget::CaptureWidget(const CaptureRequest& req,
         } else {
             preSelectedMonitor = -1;
         }
-        m_context.screenshot =
-          grabber.grabEntireDesktop(ok, preSelectedMonitor);
+#if defined(Q_OS_WIN)
+        if (preSelectedMonitor < 0 && m_config.spanAllMonitors()) {
+            m_context.screenshot = grabber.grabFullDesktop(ok);
+            m_spanNativeRect = ScreenGrabber::nativeDesktopRect();
+        } else
+#endif
+        {
+            m_context.screenshot =
+              grabber.grabEntireDesktop(ok, preSelectedMonitor);
+        }
         if (!ok) {
             // Error already logged in ScreenGrabber
             this->close();
@@ -139,7 +150,32 @@ CaptureWidget::CaptureWidget(const CaptureRequest& req,
 #endif
         // Position the window at the selected screen's position
         // (or the topLeft of all screens if no specific screen was selected)
-        if (selectedScreen) {
+        if (!m_spanNativeRect.isNull()) {
+            // Windows gives a window covering several monitors the scale
+            // factor of the monitor holding most of it. Using that factor
+            // as the screenshot's device pixel ratio paints one screenshot
+            // pixel per native pixel on every monitor.
+            QScreen* hostScreen = QGuiApplication::primaryScreen();
+            int hostArea = 0;
+            for (QScreen* const screen : QGuiApplication::screens()) {
+                const QSize size =
+                  ScreenGrabber::nativeScreenRect(screen).size();
+                if (size.width() * size.height() > hostArea) {
+                    hostArea = size.width() * size.height();
+                    hostScreen = screen;
+                }
+            }
+            selectedScreen = hostScreen;
+            // Creates the native window, so setScreen() below takes effect
+            winId();
+            const qreal dpr = hostScreen->devicePixelRatio();
+            m_context.screenshot.setDevicePixelRatio(dpr);
+            m_context.origScreenshot = m_context.screenshot;
+            // A first guess in Qt's coordinates; showEvent() sets the exact
+            // native rectangle
+            const QPoint origin = hostScreen->geometry().topLeft();
+            move(origin + (m_spanNativeRect.topLeft() - origin) / dpr);
+        } else if (selectedScreen) {
             move(selectedScreen->geometry().topLeft());
         } else {
             for (QScreen* const screen : QGuiApplication::screens()) {
@@ -204,7 +240,28 @@ CaptureWidget::CaptureWidget(const CaptureRequest& req,
     }
 
     QVector<QRect> areas;
-    if (m_context.fullscreen) {
+    bool spanning = false;
+#if defined(Q_OS_WIN)
+    spanning = !m_spanNativeRect.isNull();
+    if (spanning) {
+        const qreal dpr = m_context.screenshot.devicePixelRatio();
+        POINT cursor{};
+        GetCursorPos(&cursor);
+        for (QScreen* const screen : QGuiApplication::screens()) {
+            const QRect native = ScreenGrabber::nativeScreenRect(screen);
+            const QRect local((native.topLeft() - m_spanNativeRect.topLeft()) /
+                                dpr,
+                              native.size() / dpr);
+            areas.append(local);
+            if (native.contains(cursor.x, cursor.y)) {
+                m_cursorScreenArea = local;
+            }
+        }
+    }
+#endif
+    if (spanning) {
+        // areas were filled above
+    } else if (m_context.fullscreen) {
         // Always display on a single screen, normalized to (0, 0)
         QScreen* screenForAreas = selectedScreen;
         if (!screenForAreas) {
@@ -289,6 +346,9 @@ CaptureWidget::CaptureWidget(const CaptureRequest& req,
     // In fullscreen mode, use the normalized area; otherwise use widget rect
     QRect overlayArea =
       m_context.fullscreen && !areas.isEmpty() ? areas.first() : rect();
+    if (!m_cursorScreenArea.isNull()) {
+        overlayArea = m_cursorScreenArea;
+    }
     OverlayMessage::init(this, overlayArea);
 
     if (m_config.showHelp()) {
@@ -1086,7 +1146,10 @@ void CaptureWidget::setToolSize(int size)
         }
     }
     int offset = m_notifierBox->width() / 4;
-    m_notifierBox->move(mapFromGlobal(topLeft) + QPoint(offset, offset));
+    const QPoint localTopLeft = m_cursorScreenArea.isNull()
+                                  ? mapFromGlobal(topLeft)
+                                  : m_cursorScreenArea.topLeft();
+    m_notifierBox->move(localTopLeft + QPoint(offset, offset));
     m_notifierBox->showMessage(QString::number(m_context.toolSize));
 
     if (m_context.toolSize != oldSize) {
@@ -1186,6 +1249,24 @@ void CaptureWidget::moveEvent(QMoveEvent* e)
     m_context.widgetOffset = mapToGlobal(QPoint(0, 0));
 }
 
+#if defined(Q_OS_WIN)
+void CaptureWidget::showEvent(QShowEvent* e)
+{
+    QWidget::showEvent(e);
+    if (!m_spanNativeRect.isNull()) {
+        // Qt cannot express a rectangle that crosses monitors with
+        // different scale factors, so place the window in native pixels
+        SetWindowPos(reinterpret_cast<HWND>(winId()),
+                     nullptr,
+                     m_spanNativeRect.x(),
+                     m_spanNativeRect.y(),
+                     m_spanNativeRect.width(),
+                     m_spanNativeRect.height(),
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+}
+#endif
+
 void CaptureWidget::changeEvent(QEvent* e)
 {
     if (e->type() == QEvent::ActivationChange) {
@@ -1213,7 +1294,7 @@ void CaptureWidget::initPanel()
     // Use widget-local coordinates (rect()) for all child widgets
     // Child widgets use parent-relative coordinate system, not global screen
     // coords
-    QRect panelRect = rect();
+    QRect panelRect = m_cursorScreenArea.isNull() ? rect() : m_cursorScreenArea;
 
     if (ConfigHandler().showSidePanelButton()) {
         auto* panelToggleButton =

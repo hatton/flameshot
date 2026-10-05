@@ -57,6 +57,9 @@ GeneralConf::GeneralConf(QWidget* parent)
 #if !defined(Q_OS_MACOS)
     initCaptureActiveMonitor();
 #endif
+#if defined(Q_OS_WIN)
+    initSpanAllMonitors();
+#endif
 #if defined(Q_OS_MACOS)
     initUseNativeFullscreen();
 #endif
@@ -131,6 +134,9 @@ void GeneralConf::_updateComponents(bool allowEmptySavePath)
 
 #if !defined(Q_OS_MACOS)
     m_captureActiveMonitor->setChecked(config.captureActiveMonitor());
+#endif
+#if defined(Q_OS_WIN)
+    m_spanAllMonitors->setChecked(config.spanAllMonitors());
 #endif
 #if defined(Q_OS_MACOS)
     m_useNativeFullscreen->setChecked(config.useNativeFullscreen());
@@ -957,6 +963,29 @@ void GeneralConf::initCaptureActiveMonitor()
 void GeneralConf::captureActiveMonitorChanged(bool checked)
 {
     ConfigHandler().setCaptureActiveMonitor(checked);
+}
+#endif
+
+#if defined(Q_OS_WIN)
+void GeneralConf::initSpanAllMonitors()
+{
+    m_spanAllMonitors =
+      new QCheckBox(tr("Span all monitors (skip monitor selection)"), this);
+    m_spanAllMonitors->setToolTip(
+      tr("Cover every monitor with one capture overlay, so a selection can "
+         "start on any monitor. Takes precedence over capturing the active "
+         "monitor."));
+    m_scrollAreaLayout->addWidget(m_spanAllMonitors);
+
+    connect(m_spanAllMonitors,
+            &QCheckBox::clicked,
+            this,
+            &GeneralConf::spanAllMonitorsChanged);
+}
+
+void GeneralConf::spanAllMonitorsChanged(bool checked)
+{
+    ConfigHandler().setSpanAllMonitors(checked);
 }
 #endif
 

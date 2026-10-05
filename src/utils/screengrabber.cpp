@@ -26,6 +26,11 @@
 #include <QDebug>
 #endif
 
+#if defined(Q_OS_WIN)
+#include <QtGui/qscreen_platform.h>
+#include <windows.h>
+#endif
+
 #if !(defined(Q_OS_MACOS) || defined(Q_OS_WIN))
 #include "request.h"
 #include <QDBusInterface>
@@ -404,8 +409,11 @@ QPixmap ScreenGrabber::grabScreen(QScreen* screen, bool& ok)
     p = grabEntireDesktop(ok, screenIndex);
 #else
     ok = true;
-    return screen->grabWindow(
+    p = screen->grabWindow(
       0, geometry.x(), geometry.y(), geometry.width(), geometry.height());
+#if defined(Q_OS_WIN)
+    drawCursor(p, nativeScreenRect(screen).topLeft());
+#endif
 #endif
     return p;
 }
@@ -697,8 +705,15 @@ QPixmap ScreenGrabber::cropToMonitor(const QPixmap& fullScreenshot,
     cropY = qRound((targetGeometry.y() - minY) * screenshotScaleY);
     cropWidth = qRound(targetGeometry.width() * screenshotScaleX);
     cropHeight = qRound(targetGeometry.height() * screenshotScaleY);
+#elif defined(Q_OS_WIN)
+    const QRect nativeRect = nativeScreenRect(targetScreen);
+    const QPoint nativeOrigin = nativeDesktopRect().topLeft();
+    cropX = nativeRect.x() - nativeOrigin.x();
+    cropY = nativeRect.y() - nativeOrigin.y();
+    cropWidth = nativeRect.width();
+    cropHeight = nativeRect.height();
 #else
-    // Windows: Calculate physical pixel positions for mixed DPI
+    // Calculate physical pixel positions for mixed DPI
     cropX = 0;
     cropY = 0;
 
@@ -780,80 +795,140 @@ QPixmap ScreenGrabber::cropToMonitor(const QPixmap& fullScreenshot,
 
 QPixmap ScreenGrabber::windowsScreenshot(int wid)
 {
-    const QList<QScreen*> screens = QGuiApplication::screens();
-    QRect geometry = desktopGeometry();
-
-    int canvasWidth = 0;
-    int canvasHeight = 0;
-
-    // Build a map tracking where each screen should be positioned in
-    // physical pixels
-    struct ScreenInfo
-    {
-        QRect physicalRect; // Where to draw in the canvas
-        QPixmap pixmap;
-    };
-    QMap<QScreen*, ScreenInfo> screenInfos;
-
-    int minLogicalX = geometry.x();
-    int minLogicalY = geometry.y();
-
-    for (QScreen* screen : screens) {
-        QRect screenGeom = screen->geometry();
-        qreal screenDpr = screen->devicePixelRatio();
-
-        QPixmap screenPixmap = screen->grabWindow(wid);
-        screenPixmap.setDevicePixelRatio(1.0);
-
-        int logicalX = screenGeom.x() - minLogicalX;
-        int logicalY = screenGeom.y() - minLogicalY;
-
-        int physicalWidth = screenPixmap.width();
-        int physicalHeight = screenPixmap.height();
-
-        int physicalX = 0;
-        int physicalY = 0;
-
-        for (QScreen* otherScreen : screens) {
-            QRect otherGeom = otherScreen->geometry();
-            qreal otherDpr = otherScreen->devicePixelRatio();
-
-            // If this screen is entirely to the left of current screen
-            if (otherGeom.x() + otherGeom.width() <= screenGeom.x()) {
-                physicalX += qRound(otherGeom.width() * otherDpr);
-            }
-
-            // If this screen is entirely above the current screen
-            if (otherGeom.y() + otherGeom.height() <= screenGeom.y()) {
-                physicalY += qRound(otherGeom.height() * otherDpr);
-            }
-        }
-
-        ScreenInfo info;
-        info.physicalRect =
-          QRect(physicalX, physicalY, physicalWidth, physicalHeight);
-        info.pixmap = screenPixmap;
-        screenInfos[screen] = info;
-
-        canvasWidth = qMax(canvasWidth, physicalX + physicalWidth);
-        canvasHeight = qMax(canvasHeight, physicalY + physicalHeight);
-    }
-
-    // Composite all screens onto canvas
-    QPixmap desktop(canvasWidth, canvasHeight);
+#if defined(Q_OS_WIN)
+    // Place each screen at its native position, so the composite matches
+    // the real arrangement even when monitors differ in scale or height.
+    // Areas that no monitor covers stay black.
+    const QRect desktopRect = nativeDesktopRect();
+    QPixmap desktop(desktopRect.size());
     desktop.fill(Qt::black);
 
     QPainter painter(&desktop);
     painter.setCompositionMode(QPainter::CompositionMode_Source);
-
-    for (QScreen* screen : screens) {
-        const ScreenInfo& info = screenInfos[screen];
-        painter.drawPixmap(info.physicalRect.topLeft(), info.pixmap);
+    for (QScreen* screen : QGuiApplication::screens()) {
+        QPixmap screenPixmap = screen->grabWindow(wid);
+        screenPixmap.setDevicePixelRatio(1.0);
+        painter.drawPixmap(nativeScreenRect(screen).topLeft() -
+                             desktopRect.topLeft(),
+                           screenPixmap);
     }
     painter.end();
 
+    drawCursor(desktop, desktopRect.topLeft());
     return desktop;
+#else
+    Q_UNUSED(wid)
+    return QPixmap();
+#endif
 }
+
+#if defined(Q_OS_WIN)
+QRect ScreenGrabber::nativeScreenRect(QScreen* screen)
+{
+    auto* windowsScreen =
+      screen->nativeInterface<QNativeInterface::QWindowsScreen>();
+    if (windowsScreen) {
+        MONITORINFO info{};
+        info.cbSize = sizeof(info);
+        if (GetMonitorInfoW(windowsScreen->handle(), &info)) {
+            const RECT& r = info.rcMonitor;
+            return { r.left, r.top, r.right - r.left, r.bottom - r.top };
+        }
+    }
+    const QRect geometry = screen->geometry();
+    return { geometry.topLeft(), geometry.size() * screen->devicePixelRatio() };
+}
+
+QRect ScreenGrabber::nativeDesktopRect()
+{
+    QRect rect;
+    for (QScreen* screen : QGuiApplication::screens()) {
+        rect = rect.united(nativeScreenRect(screen));
+    }
+    return rect;
+}
+
+// Paints the mouse cursor onto pixmap, whose top-left pixel sits at
+// nativeOrigin in virtual-desktop pixels. GDI does the drawing so that
+// cursors with an inverting mask, such as the text I-beam, invert the
+// pixels beneath them as they do on screen.
+void ScreenGrabber::drawCursor(QPixmap& pixmap, const QPoint& nativeOrigin)
+{
+    CURSORINFO cursorInfo{};
+    cursorInfo.cbSize = sizeof(cursorInfo);
+    if (!GetCursorInfo(&cursorInfo) || !(cursorInfo.flags & CURSOR_SHOWING) ||
+        !cursorInfo.hCursor) {
+        return;
+    }
+
+    ICONINFO iconInfo{};
+    if (!GetIconInfo(cursorInfo.hCursor, &iconInfo)) {
+        return;
+    }
+    BITMAP mask{};
+    GetObject(iconInfo.hbmMask, sizeof(mask), &mask);
+    // A monochrome cursor stacks its AND and XOR masks in one bitmap
+    QSize cursorSize(mask.bmWidth,
+                     iconInfo.hbmColor ? mask.bmHeight : mask.bmHeight / 2);
+    QPoint hotspot(static_cast<int>(iconInfo.xHotspot),
+                   static_cast<int>(iconInfo.yHotspot));
+    if (iconInfo.hbmColor) {
+        DeleteObject(iconInfo.hbmColor);
+    }
+    DeleteObject(iconInfo.hbmMask);
+
+    const QPoint cursorPos(cursorInfo.ptScreenPos.x, cursorInfo.ptScreenPos.y);
+
+    // The cursor image is sized for the system DPI. Windows rescales it on
+    // a monitor with a different scale factor, so do the same.
+    const qreal systemDpi = GetDpiForSystem();
+    for (QScreen* screen : QGuiApplication::screens()) {
+        if (systemDpi > 0 && nativeScreenRect(screen).contains(cursorPos)) {
+            const qreal scale = screen->devicePixelRatio() * 96.0 / systemDpi;
+            cursorSize = cursorSize * scale;
+            hotspot = hotspot * scale;
+            break;
+        }
+    }
+    const QRect cursorRect(cursorPos - hotspot - nativeOrigin, cursorSize);
+    const qreal dpr = pixmap.devicePixelRatio();
+    pixmap.setDevicePixelRatio(1.0);
+    if (cursorSize.isEmpty() || !cursorRect.intersects(pixmap.rect())) {
+        pixmap.setDevicePixelRatio(dpr);
+        return;
+    }
+
+    QImage patch(cursorSize, QImage::Format_RGB32);
+    patch.fill(Qt::black);
+    {
+        QPainter patchPainter(&patch);
+        patchPainter.drawPixmap(QPoint(0, 0), pixmap, cursorRect);
+    }
+
+    HBITMAP bitmap = patch.toHBITMAP();
+    HDC dc = CreateCompatibleDC(nullptr);
+    HGDIOBJ previous = SelectObject(dc, bitmap);
+    DrawIconEx(dc,
+               0,
+               0,
+               cursorInfo.hCursor,
+               cursorSize.width(),
+               cursorSize.height(),
+               0,
+               nullptr,
+               DI_NORMAL);
+    SelectObject(dc, previous);
+    DeleteDC(dc);
+    const QImage drawn = QImage::fromHBITMAP(bitmap);
+    DeleteObject(bitmap);
+
+    QPainter painter(&pixmap);
+    painter.setCompositionMode(QPainter::CompositionMode_Source);
+    painter.drawImage(cursorRect.topLeft(), drawn);
+    painter.end();
+    pixmap.setDevicePixelRatio(dpr);
+}
+#endif
 
 QPixmap ScreenGrabber::x11LegacyScreenshot()
 {

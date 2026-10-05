@@ -111,6 +111,9 @@ protected:
     void moveEvent(QMoveEvent* moveEvent) override;
     void changeEvent(QEvent* changeEvent) override;
     void closeEvent(QCloseEvent* event) override;
+#if defined(Q_OS_WIN)
+    void showEvent(QShowEvent* event) override;
+#endif
 
 private:
     void pushObjectsStateToUndoStack();
@@ -214,6 +217,15 @@ private:
 
     QPoint m_mousePressedPos;
     QPoint m_activeToolOffsetToMouseOnStart;
+
+#if defined(Q_OS_WIN)
+    // Set when the overlay spans every monitor: the window's rectangle in
+    // virtual-desktop pixels, unscaled by DPI
+    QRect m_spanNativeRect;
+#endif
+    // Where the side panel, help message and tool-size notice go, in
+    // widget coordinates. Null means the whole widget.
+    QRect m_cursorScreenArea;
 
     // XYWH display position and timer
     bool m_xywhDisplay;

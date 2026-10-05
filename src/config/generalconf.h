@@ -64,6 +64,9 @@ private slots:
 #if !defined(Q_OS_MACOS)
     void captureActiveMonitorChanged(bool checked);
 #endif
+#if defined(Q_OS_WIN)
+    void spanAllMonitorsChanged(bool checked);
+#endif
 #if defined(Q_OS_MACOS)
     void useNativeFullscreenChanged(bool checked);
 #endif
@@ -111,6 +114,9 @@ private:
     void initInsecurePixelate();
 #if !defined(Q_OS_MACOS)
     void initCaptureActiveMonitor();
+#endif
+#if defined(Q_OS_WIN)
+    void initSpanAllMonitors();
 #endif
 #if defined(Q_OS_MACOS)
     void initUseNativeFullscreen();
@@ -169,6 +175,9 @@ private:
     QCheckBox* m_insecurePixelate;
 #if !defined(Q_OS_MACOS)
     QCheckBox* m_captureActiveMonitor;
+#endif
+#if defined(Q_OS_WIN)
+    QCheckBox* m_spanAllMonitors;
 #endif
 #if defined(Q_OS_MACOS)
     QCheckBox* m_useNativeFullscreen;

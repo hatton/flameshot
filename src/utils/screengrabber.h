@@ -36,6 +36,11 @@ public:
     int getSelectedMonitor() const { return m_selectedMonitor; }
     QScreen* getSelectedScreen() const;
     QPixmap selectMonitorAndCrop(const QPixmap& fullScreenshot, bool& ok);
+#if defined(Q_OS_WIN)
+    // Rectangles in Windows virtual-desktop pixels, unscaled by DPI
+    static QRect nativeScreenRect(QScreen* screen);
+    static QRect nativeDesktopRect();
+#endif
 
 protected:
     bool eventFilter(QObject* obj, QEvent* event) override;
@@ -51,6 +56,9 @@ private:
     void setHighlightedMonitorPreview(int previewIndex);
     QPixmap cropToMonitor(const QPixmap& fullScreenshot, int monitorIndex);
     QPixmap windowsScreenshot(int wid);
+#if defined(Q_OS_WIN)
+    static void drawCursor(QPixmap& pixmap, const QPoint& nativeOrigin);
+#endif
     QPixmap x11LegacyScreenshot();
     QPixmap unixScreenshot(bool& ok);
 
